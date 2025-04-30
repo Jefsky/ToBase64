@@ -6,6 +6,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() {
   runApp(const MyApp());
@@ -39,6 +41,88 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
   List<FileItem> _files = [];
   bool _isLoading = false;
   bool _isDragging = false;
+  String? _defaultSavePath; // 默认保存路径
+  bool _isInitializing = true; // 添加初始化标志
+
+  @override
+  void initState() {
+    super.initState();
+    // 使用Future.microtask确保不会阻塞UI初始化
+    Future.microtask(() => _loadSavedPath());
+  }
+
+  // 加载保存的路径
+  Future<void> _loadSavedPath() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedPath = prefs.getString('defaultSavePath');
+      
+      // 检查路径是否存在
+      if (savedPath != null) {
+        final directory = Directory(savedPath);
+        final exists = await directory.exists();
+        
+        setState(() {
+          _defaultSavePath = exists ? savedPath : null;
+          _isInitializing = false;
+        });
+      } else {
+        setState(() {
+          _defaultSavePath = null;
+          _isInitializing = false;
+        });
+      }
+    } catch (e) {
+      // 忽略错误，使用null作为默认值
+      setState(() {
+        _defaultSavePath = null;
+        _isInitializing = false;
+      });
+      print('加载保存路径时发生错误: $e');
+    }
+  }
+
+  // 保存路径到本地存储
+  Future<void> _saveDefaultPath(String path) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('defaultSavePath', path);
+      setState(() {
+        _defaultSavePath = path;
+      });
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('保存默认路径时发生错误: $e')),
+      );
+    }
+  }
+
+  // 设置默认保存路径
+  Future<void> _setDefaultSavePath() async {
+    try {
+      String? outputDirectory = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '选择默认保存位置',
+      );
+      
+      if (outputDirectory == null) {
+        // 用户取消了选择
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已取消设置默认保存位置')),
+        );
+        return;
+      }
+      
+      await _saveDefaultPath(outputDirectory);
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('默认保存位置已设置为: $outputDirectory')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('设置默认保存位置时发生错误: $e')),
+      );
+    }
+  }
 
   Future<void> _pickFiles() async {
     setState(() {
@@ -64,6 +148,7 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
               path: file.path!,
               size: file.size,
               base64: base64String,
+              isSelected: true, // 默认选中新添加的文件
             ));
           }
         }
@@ -101,6 +186,7 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
           path: xFile.path,
           size: await file.length(),
           base64: base64String,
+          isSelected: true, // 默认选中新添加的文件
         ));
       }
       
@@ -119,12 +205,70 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
     }
   }
 
-  Future<void> _saveBase64ToFile(FileItem file) async {
-    try {
-      // 使用FilePicker让用户选择保存位置
-      String? outputDirectory = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: '选择保存位置',
+  // 打开保存路径文件夹
+  Future<void> _openSaveDirectory() async {
+    if (_isInitializing) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('应用正在初始化，请稍后再试')),
       );
+      return;
+    }
+    
+    if (_defaultSavePath == null) {
+      // 如果没有设置默认路径，先设置
+      await _setDefaultSavePath();
+      if (_defaultSavePath == null) {
+        // 用户取消了设置
+        return;
+      }
+    }
+
+    try {
+      final Uri uri = Uri.file(_defaultSavePath!);
+      if (!await launchUrl(uri)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法打开文件夹')),
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('打开文件夹时发生错误: $e')),
+      );
+    }
+  }
+
+  // 打开单个文件所在的文件夹
+  Future<void> _openFileDirectory(String filePath) async {
+    try {
+      final directory = File(filePath).parent.path;
+      final Uri uri = Uri.file(directory);
+      if (!await launchUrl(uri)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法打开文件夹')),
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('打开文件夹时发生错误: $e')),
+      );
+    }
+  }
+
+  Future<void> _saveBase64ToFile(FileItem file, {bool useDefaultPath = true}) async {
+    try {
+      String? outputDirectory;
+      
+      if (useDefaultPath && _defaultSavePath != null) {
+        // 使用默认保存路径
+        outputDirectory = _defaultSavePath;
+      } else {
+        // 使用FilePicker让用户选择保存位置
+        outputDirectory = await FilePicker.platform.getDirectoryPath(
+          dialogTitle: '选择保存位置',
+        );
+        
+        // 注意：这里不会更新默认保存路径，单独保存时选择的路径只用于当前操作
+      }
       
       if (outputDirectory == null) {
         // 用户取消了选择
@@ -139,12 +283,85 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
       await outputFile.writeAsString(file.base64);
       
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Base64文件已保存到: $filePath')),
+        SnackBar(
+          content: Text('Base64文件已保存到: $filePath'),
+          action: SnackBarAction(
+            label: '打开文件夹',
+            onPressed: () => _openFileDirectory(filePath),
+          ),
+        ),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('保存文件时发生错误: $e')),
       );
+    }
+  }
+
+  // 批量下载所有文件
+  Future<void> _batchDownloadAllFiles() async {
+    if (_isInitializing) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('应用正在初始化，请稍后再试')),
+      );
+      return;
+    }
+    
+    // 获取选中的文件
+    final selectedFiles = _files.where((file) => file.isSelected).toList();
+    
+    if (selectedFiles.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先选择要下载的文件')),
+      );
+      return;
+    }
+
+    if (_defaultSavePath == null) {
+      // 如果没有设置默认路径，先设置
+      await _setDefaultSavePath();
+      if (_defaultSavePath == null) {
+        // 用户取消了设置
+        return;
+      }
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      int successCount = 0;
+      
+      for (var file in selectedFiles) {
+        try {
+          final filePath = '$_defaultSavePath/${file.name}_base64.txt';
+          final outputFile = File(filePath);
+          await outputFile.writeAsString(file.base64);
+          successCount++;
+        } catch (e) {
+          // 继续处理下一个文件
+          print('保存文件 ${file.name} 时发生错误: $e');
+        }
+      }
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已成功保存 $successCount/${selectedFiles.length} 个文件到: $_defaultSavePath'),
+          action: SnackBarAction(
+            label: '打开文件夹',
+            onPressed: _openSaveDirectory,
+          ),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('批量下载文件时发生错误: $e')),
+      );
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
 
@@ -174,13 +391,51 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
+  bool _isAllSelected() {
+    if (_files.isEmpty) return false;
+    return _files.every((file) => file.isSelected);
+  }
+
+  void _toggleSelectAll() {
+    final shouldSelect = !_isAllSelected();
+    setState(() {
+      for (var file in _files) {
+        file.isSelected = shouldSelect;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    // 计算选中的文件数量
+    final selectedCount = _files.where((file) => file.isSelected).length;
+    
     return Scaffold(
       appBar: AppBar(
         title: const Text('ToBase64'),
         centerTitle: true,
         actions: [
+          if (_files.isNotEmpty)
+            Badge(
+              label: selectedCount > 0 ? Text('$selectedCount') : null,
+              isLabelVisible: selectedCount > 0,
+              child: IconButton(
+                icon: const Icon(Icons.download),
+                tooltip: '批量下载选中的文件',
+                onPressed: _isInitializing ? null : _batchDownloadAllFiles,
+              ),
+            ),
+          IconButton(
+            icon: const Icon(Icons.folder),
+            tooltip: '设置默认保存路径',
+            onPressed: _isInitializing ? null : _setDefaultSavePath,
+          ),
+          if (_defaultSavePath != null && !_isInitializing)
+            IconButton(
+              icon: const Icon(Icons.folder_open),
+              tooltip: '打开保存路径文件夹',
+              onPressed: _openSaveDirectory,
+            ),
           if (_files.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.delete_sweep),
@@ -299,6 +554,25 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
               ),
+              if (_files.isNotEmpty && !_isInitializing)
+                TextButton.icon(
+                  icon: const Icon(Icons.select_all, size: 18),
+                  label: Text(_isAllSelected() ? '取消全选' : '全选'),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: _toggleSelectAll,
+                ),
+              if (_isInitializing)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                  ),
+                ),
             ],
           ),
         ),
@@ -313,9 +587,22 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
                     return Card(
                       margin: const EdgeInsets.only(bottom: 8),
                       child: ExpansionTile(
+                        leading: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Checkbox(
+                              value: file.isSelected,
+                              onChanged: (value) {
+                                setState(() {
+                                  file.isSelected = value ?? false;
+                                });
+                              },
+                            ),
+                            const Icon(Icons.insert_drive_file),
+                          ],
+                        ),
                         title: Text(file.name, style: const TextStyle(fontWeight: FontWeight.bold)),
                         subtitle: Text('大小: ${_formatFileSize(file.size)}'),
-                        leading: const Icon(Icons.insert_drive_file),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -327,7 +614,9 @@ class _FileToBase64PageState extends State<FileToBase64Page> {
                             IconButton(
                               icon: const Icon(Icons.save, color: Colors.green),
                               tooltip: '保存Base64',
-                              onPressed: () => _saveBase64ToFile(file),
+                              onPressed: _isInitializing 
+                                  ? null 
+                                  : () => _saveBase64ToFile(file, useDefaultPath: false),
                             ),
                             IconButton(
                               icon: const Icon(Icons.delete, color: Colors.red),
@@ -379,11 +668,13 @@ class FileItem {
   final String path;
   final int size;
   final String base64;
+  bool isSelected;
 
   FileItem({
     required this.name,
     required this.path,
     required this.size,
     required this.base64,
+    this.isSelected = false,
   });
 }
